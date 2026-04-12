@@ -6,7 +6,7 @@ import (
 	"unsafe"
 )
 
-const MpmcQueueMaxRequestedCapacity uint64 = uint64(1) << (bits.UintSize - 2)
+const mpmcQueueMaxRequestedCapacity uint64 = uint64(1) << (bits.UintSize - 2)
 
 // Deprecated: use [MPMCQueue].
 type MPMCQueueOf[I any] = MPMCQueue[I]
@@ -20,12 +20,12 @@ type MPMCQueueOf[I any] = MPMCQueue[I]
 // Based on the data structure from the following C++ library:
 // https://github.com/rigtorp/MPMCQueue
 type MPMCQueue[I any] struct {
-	cap     uint64
-	mask    uint64
-	capLog2 uint64
-	head    uint64
-	// Padding to prevent false sharing.
-	_     [cacheLineSize - 32]byte
+	capMask  uint64
+	capShift uint64
+	// Padding to isolate read-only fields from the head/tail counters.
+	_     [cacheLineSize - 16]byte
+	head  uint64
+	_     [cacheLineSize - 8]byte
 	tail  uint64
 	_     [cacheLineSize - 8]byte
 	slots []slotPadded[I]
@@ -60,15 +60,14 @@ func NewMPMCQueue[I any](capacity int) *MPMCQueue[I] {
 	if capacity < 1 {
 		panic("capacity must be positive number")
 	}
-	if uint64(capacity) > MpmcQueueMaxRequestedCapacity {
+	if uint64(capacity) > mpmcQueueMaxRequestedCapacity {
 		panic("capacity is too large")
 	}
-	capPow2 := nextPowOf2_64(uint64(capacity))
+	capPow2 := nextPowOf2(uint64(capacity))
 	return &MPMCQueue[I]{
-		cap:     capPow2,
-		mask:    capPow2 - 1,
-		capLog2: uint64(bits.TrailingZeros64(capPow2)),
-		slots:   make([]slotPadded[I], capPow2),
+		capMask:  capPow2 - 1,
+		capShift: uint64(bits.TrailingZeros64(capPow2)),
+		slots:    make([]slotPadded[I], capPow2),
 	}
 }
 
@@ -110,9 +109,9 @@ func (q *MPMCQueue[I]) TryDequeue() (item I, ok bool) {
 }
 
 func (q *MPMCQueue[I]) idx(i uint64) uint64 {
-	return i & q.mask
+	return i & q.capMask
 }
 
 func (q *MPMCQueue[I]) turn(i uint64) uint64 {
-	return i >> q.capLog2
+	return i >> q.capShift
 }
